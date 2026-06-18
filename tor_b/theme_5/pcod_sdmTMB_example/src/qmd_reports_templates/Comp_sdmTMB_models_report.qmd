@@ -1,0 +1,385 @@
+---
+format: 
+  html:
+    embed-resources: true
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-expand: true
+execute:
+  echo: false
+  warning: false
+  message: false
+params:
+  description: NULL
+  model_files: NULL
+  cv_objs_file: NULL
+  m_input_data_file: NULL
+  response_variable: "catchweight"
+  cluster_vector: NULL
+  save_location: NULL
+---
+
+```{r params}
+# Access parameters
+description  <- params$description
+model_files <- params$model_files
+cv_objs_file <- params$cv_objs_file
+m_input_data_file <- params$m_input_data_file
+resp_var <- params$response_variable
+meshcutoff <- params$mesh_cutoff
+clust <- params$cluster_vector
+offset_cn <- params$offset_col_name
+save_loc <- params$save_location
+save_flag <- ifelse(is.null(save_loc), FALSE, TRUE)
+
+cat(description, "\n")
+
+```
+
+```{r load_packages}
+library(glmmTMB)
+library(DHARMa)
+library(ggOceanMaps)
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(dplyr)
+library(tidyr)
+library(mgcv)
+library(sdmTMB)
+library(purrr)
+library(gt)
+library(scales)
+
+src_folder_location <- "src/"
+
+source(paste0(src_folder_location, "additional_quarto_funcs.R"))
+source(paste0(src_folder_location, "Variogram_function.R"))
+```
+
+```{r collectmodels}
+
+cv_objs <- readRDS(cv_objs_file)
+
+ms_n  <- names(cv_objs)
+
+ms <- setNames(
+  lapply(model_files, function(m) {
+    e <- new.env()
+    nm <- load_object(m)
+    nm
+  }),
+  ms_n
+)
+
+df <- load_object(m_input_data_file)
+
+yearly_figs_h <- length(unique(df$startyear)) * 5
+
+```
+
+# CV models
+
+```{r show_cv_models}
+
+cat("Models: ", ms_n, sep = "\n")
+
+```
+
+
+# Cluster map
+
+```{r clusteringmap, fig.cap="Clusters used for CV."}
+df$clust <- clust
+
+ggOceanMaps::basemap(df, crs=4326, land.col = "peachpuff") +
+  geom_point(data=df, aes(x=longitudestart, y=latitudestart, color = as.factor(clust))) +
+  labs(color = "Clusters") +
+  theme_minimal()
+```
+
+# Results
+
+## All folds
+
+```{r table_all_folds}
+
+all_folds <- map_dfr(ms_n, function(m){
+  
+ AICs_total <- data.frame(
+    model = m,
+    AIC = AIC(ms[[m]]),
+    CV_LogLik = cv_objs[[m]]$sum_loglik,
+    RMSE = sqrt(mean((cv_objs[[m]]$data[[resp_var]] - cv_objs[[m]]$data$cv_predicted)^2)),
+    MAE = mean(abs(cv_objs[[m]]$data[[resp_var]] - cv_objs[[m]]$data$cv_predicted)))
+
+  
+  AICs_total })
+
+
+all_folds_long <- all_folds %>%
+  pivot_longer(cols = c(AIC, CV_LogLik, RMSE, MAE),
+               names_to = "metric",
+               values_to = "value")
+
+all_folds %>%
+  arrange(RMSE) %>%
+  gt() %>%
+  tab_header(
+    title = "Model Performance Summary",
+    subtitle = "Cross-validation metrics (overall)"
+  ) %>%
+  fmt_number(
+    columns = c(AIC, CV_LogLik, RMSE, MAE),
+    decimals = 2
+  ) %>%
+  cols_label(
+    model = "Model",
+    AIC = "AIC",
+    CV_LogLik = "CV Log-Likelihood",
+    RMSE = "RMSE",
+    MAE = "MAE"
+  ) %>%
+
+  # ✅ LOWER = BETTER → green (good) to red (bad)
+  data_color(
+    columns = c(RMSE, MAE, AIC),
+    fn = scales::col_numeric(
+      palette = c("#1a9850", "#d73027"),
+      domain = NULL
+    )
+  ) %>%
+
+  # ✅ HIGHER = BETTER (CV_LogLik)
+  data_color(
+    columns = CV_LogLik,
+    fn = scales::col_numeric(
+      palette = c("#d73027", "#1a9850"),
+      domain = NULL
+    )
+  )
+
+
+```
+
+### Barplots
+
+```{r all_folds_barplots}
+ggplot(all_folds_long, aes(x = model, y = value, fill = model)) +
+  geom_col(show.legend = TRUE) +
+  facet_wrap(~metric, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Model comparison (overall)",
+       x = "Model", y = "Value")
+```
+
+### Scaled barplots
+
+```{r all_scaled}
+all_folds_scaled <- all_folds_long %>%
+  group_by(metric) %>%
+  mutate(value_scaled = (value - mean(value))) %>%
+  ungroup()
+
+ggplot(all_folds_scaled, aes(x = model, y = value_scaled, fill = model)) +
+  geom_col(show.legend = TRUE) +
+  facet_wrap(~metric, scales = "free_y") +
+  theme_minimal() +
+  labs(y = "Absolute difference from mean")
+```
+
+## By fold
+
+```{r metrics_by_fold}
+by_fold <- map_dfr(ms_n, function(m){
+  
+    AICs_mod <- map_dfr(1:length(unique(clust)), function(clu){
+    
+      df_fold <- cv_objs[[m]]$data %>% mutate(clust = clust) %>% filter(clust == clu)
+      
+      AICs_clu <- data.frame(model = m,
+                             cluster = clu,
+                             AIC = cv_objs[[m]]$models[[clu]],
+                             CV_LogLik = cv_objs[[m]]$fold_loglik[[clu]],
+                             RMSE = sqrt(mean((df_fold[[resp_var]] - df_fold$cv_predicted)^2)),
+                             MAE = mean(abs(df_fold[[resp_var]] - df_fold$cv_predicted))
+                             )
+      AICs_clu })
+  AICs_mod })
+  
+
+by_fold_long <- by_fold %>%
+  pivot_longer(cols = c(AIC, CV_LogLik, RMSE, MAE),
+               names_to = "metric",
+               values_to = "value")
+
+ggplot(by_fold_long, aes(x = factor(cluster), y = value, color = model, group = model)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~metric, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Performance by fold (cluster)",
+       x = "Cluster", y = "Value")
+```
+
+### Boxplots across folds
+
+```{r distr_ac_folds}
+
+ggplot(by_fold_long, aes(x = model, y = value, fill = model)) +
+  geom_boxplot() +
+  facet_wrap(~metric, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Distribution across folds",
+       x = "Model", y = "Value")
+
+```
+
+### RMSE AIC tradeoff
+
+```{r rmse_aic_tradeoff}
+ggplot(by_fold, aes(x = AIC, y = RMSE, color = model, label=cluster)) +
+  geom_point(size = 3) +
+  geom_text(nudge_y = 0.7, color="black") +
+  theme_minimal() +
+  labs(title = "AIC vs RMSE tradeoff")
+```
+
+### Tables by fold
+
+
+```{r table_by_fold}
+by_fold %>%
+  arrange(model, cluster) %>%
+  gt(groupname_col = "model") %>%
+  tab_header(
+    title = "Per-Fold Model Performance",
+    subtitle = "Metrics by cluster/fold"
+  ) %>%
+  fmt_number(
+    columns = c(AIC, CV_LogLik, RMSE, MAE),
+    decimals = 2
+  ) %>%
+  cols_label(
+    cluster = "Cluster",
+    AIC = "AIC",
+    CV_LogLik = "CV Log-Likelihood",
+    RMSE = "RMSE",
+    MAE = "MAE"
+  ) %>% 
+cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+
+```
+
+
+# Individual Loglik
+
+```{r loglikhists, results='asis'}
+
+for (m in ms_n) {
+  
+  # print a true Quarto subheader (must use writeLines + results='asis')
+  writeLines(sprintf("\n\n## %s\n", m))
+  
+  df$cv_loglik <- cv_objs[[m]]$data$cv_loglik
+  
+  g <- ggplot(df, aes(x = cv_loglik)) +
+    geom_histogram(
+      bins = 30,
+      fill = "#3182bd",
+      color = "white",
+      alpha = 0.9
+    ) +
+    geom_density(
+      aes(y = after_stat(count)),
+      color = "#e6550d",
+      linewidth = 1
+    ) +
+    geom_vline(
+      aes(xintercept = mean(cv_loglik, na.rm = TRUE)),
+      color = "black",
+      linetype = "dashed",
+      linewidth = 1
+    ) +
+    theme_minimal(base_size = 13) +
+    labs(
+      title = "Distribution of CV Log-Likelihood",
+      subtitle = paste0("Min: ", round(min(df$cv_loglik),2), "  Med: ", 
+                        round(median(df$cv_loglik),2), "  Mean: ", round(mean(df$cv_loglik),2),
+                        "  Max: ", round(max(df$cv_loglik),2)),
+      x = "CV Log-Likelihood",
+      y = "Count"
+    )
+  print(g)
+}
+
+```
+
+# Loglik maps
+
+```{r loglikmaps, results='asis', fig.height=yearly_figs_h}
+
+for (m in ms_n) {
+
+
+  # print a true Quarto subheader (must use writeLines + results='asis')
+  writeLines(sprintf("\n\n## %s\n", m))
+
+df$cv_loglik <- cv_objs[[m]]$data$cv_loglik
+
+g <- ggOceanMaps::basemap(data = df, crs = 4326, land.col = "whitesmoke") +
+  geom_point(data = df,
+             aes(x = longitudestart, 
+                 y = latitudestart,
+                 col = cv_loglik),size = 2.5, alpha = 0.8)  +
+  
+  scale_color_gradientn(colors = c("blue", "turquoise","yellow","lightsalmon" ,"red"),
+                       values = scales::rescale(c(0,2,4,6,8))) +
+  theme_minimal() + 
+  
+  theme(legend.position = "top",
+        panel.background = element_rect(fill = "white", colour = NA)) +
+  
+  labs(color="CV loglik") +
+  facet_wrap(~ startyear, ncol=1)
+print(g)
+}
+
+```
+
+```{r tweedie_var_comp, eval=TRUE, error=TRUE, results='asis', fig.height=8}
+writeLines(sprintf("\n\n# %s\n", "Tweedie variance comparison"))
+
+tweedie_variance_comp(model_names = ms_n,
+                      model_files = model_files)
+
+```
+
+```{r save_results, eval=save_flag, include = FALSE}
+
+#cv_tables <- list(all_folds, by_fold, by_fold_ranked_wide)
+
+cv_df <- df
+
+for (m_n in ms_n){
+  cv_df[[paste0("pred_", m_n)]] <- predict(ms[[m_n]], type = "response")$est
+  cv_df[[paste0("cv_loglik_", m_n)]] <- cv_objs[[m_n]]$data$cv_loglik
+  cv_df[[paste0("cv_predicted_", m_n)]] <- cv_objs[[m_n]]$data$cv_predicted
+  cv_df[[paste0("cv_fold_", m_n)]] <- cv_objs[[m_n]]$data$cv_fold
+}
+
+#cv_results <- list(cv_tables, cv_df)
+
+saveRDS(cv_df, file = save_loc)
+
+
+```
+
+
+
+

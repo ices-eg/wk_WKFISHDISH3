@@ -1,0 +1,515 @@
+---
+format: 
+  html:
+    embed-resources: true
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-expand: true
+execute:
+  echo: false
+  warning: false
+  message: false
+params:
+  model_name: NULL
+  m_file: NULL
+  m_input_data_file: NULL
+  predgrid_file: NULL
+  gridcell_dist: NULL
+  time_col_name: "startyear"
+  offset_col_name: NULL #"distance"
+  factor_covariates: NULL #["fYear"]
+  numeric_covariates: NULL #["Depth_std"]
+---
+
+```{r params}
+# Access parameters
+model_name  <- params$model_name
+model_file <- params$m_file
+df_surv_file <- params$m_input_data_file
+predgrid_file <- params$predgrid_file
+gridcell_dist <- params$gridcell_dist
+time_cn <- params$time_col_name
+offset_col_name <- params$offset_col_name
+fact_covs <- params$factor_covariates
+num_covs <- params$numeric_covariates
+
+fact_cns <- names(fact_covs)
+num_cns <- names(num_covs)
+
+cat("Model:", model_name, "\n")
+cat("Model file:", df_surv_file, "\n")
+
+```
+
+```{r load_packages}
+src_folder_location <- "src/"
+
+source(paste0(src_folder_location, "0_shrimp_setup.R"))
+
+library(ggOceanMaps)
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(dplyr)
+library(tidyr)
+library(gt)
+library(inlabru)
+
+source(paste0(src_folder_location, "1_survey_SDMfit_functions.R"))
+source(paste0(src_folder_location, "additional_quarto_funcs.R"))
+
+```
+
+```{r collect_modelandgrid}
+df_surv <- load_object(df_surv_file)
+m <- load_object(model_file)
+base_grid <- load_object(predgrid_file)
+
+sp_in_model <- ifelse("off" %in% m$spatial, FALSE, TRUE)
+srf_in_model <- ifelse("off" %in% m$spatiotemporal, FALSE, TRUE)
+
+hurdle <- FALSE
+if (length(m$spatial) == 2){
+  hurdle <- TRUE
+}
+
+print(paste0("Formula: ", as.character(m$formula)))
+
+#flat_xy <- df_surv %>% filter(Depth_std > 0) %>% arrange(Depth_std) %>% select(xkm,ykm) %>% slice(1)
+
+flat_xy <- data.frame(xkm = mean(df_surv$xkm),
+                      ykm = mean(df_surv$ykm))
+
+
+flat_grid <- bind_cols(
+  if (!is.null(fact_cns) && length(fact_cns) > 0)
+    as.data.frame(setNames(lapply(fact_cns, function(x) fact_covs[[x]]), fact_cns))
+  else NULL,
+  
+  if (!is.null(num_cns) && length(num_cns) > 0)
+    as.data.frame(setNames(lapply(num_cns, function(x) num_covs[[x]]), num_cns))
+  else NULL,
+  
+  flat_xy
+)
+
+
+# flat_grid <- bind_cols(
+#   as.data.frame(setNames(lapply(fact_cns, function(x) fact_covs[[x]]), factor(fact_cns))),
+#   as.data.frame(setNames(lapply(num_cns, function(x) num_covs[[x]]), num_cns)),
+#   flat_xy)
+
+```
+
+# Fixed values for conditional effects calculations
+
+```{r fixedvalstab}
+gt(flat_grid)
+```
+
+# Factor covariates effects
+
+```{r fact_covs_effect}
+
+for (f_cn in fact_cns){
+  predgrid <- replicate_df(flat_grid, f_cn, unique(df_surv[[f_cn]])) %>% st_drop_geometry()
+  
+  for (f_cn_2 in fact_cns){
+  
+  predgrid[[f_cn_2]] <- factor(predgrid[[f_cn_2]],
+                             levels = levels(df_surv[[f_cn_2]]))
+  }
+
+  predgrid[[time_cn]] <- max(df_surv[[time_cn]])
+  
+  fit_list <- sdm_fit(fitted_model = m, df = df_surv, offset_col_name = offset_col_name,
+                      grid = predgrid, gridcell_dist = gridcell_dist, calc_index = FALSE,
+                      save_to_global = FALSE, se_fit_predict = TRUE, re_form_predict = NA)
+  
+  preds <- fit_list$preds$data %>% rename(log_est = est, log_se = est_se) %>%
+    mutate(log_est_upr = log_est + 1.96 * log_se,
+           log_est_lwr = log_est - 1.96 * log_se,
+           est = exp(log_est),
+           upr = exp(log_est_upr),
+           lwr = exp(log_est_lwr))
+  
+  p <- ggplot(preds, aes(x=.data[[f_cn]], y=log_est)) +
+    geom_point() + geom_errorbar(aes(ymin=log_est_lwr, ymax=log_est_upr)) +
+    theme_minimal() +
+    labs(title="Log scale") +
+    theme(axis.text.x = element_text(angle = -45, hjust = 0))
+  
+  print(p)
+  
+  p1 <- ggplot(preds, aes(x=.data[[f_cn]], y=est)) +
+    geom_point() + geom_errorbar(aes(ymin=lwr, ymax=upr)) +
+    theme_minimal() +
+    labs(title="Natural scale") +
+    theme(axis.text.x = element_text(angle = -45, hjust = 0))
+  
+  print(p1)
+  
+  p2 <- ggplot(preds, aes(x=.data[[f_cn]], y=est)) +
+    geom_point() +
+    theme_minimal() +
+    labs(title="Natural scale w/o CI") +
+    theme(axis.text.x = element_text(angle = -45, hjust = 0))
+  
+  print(p2)
+}
+
+```
+
+# Numeric covariates effects
+
+```{r num_covs_effect}
+
+for (n_cn in num_cns){
+  
+  range_vector <- seq(min(df_surv[[n_cn]]), max(df_surv[[n_cn]]), length.out = 100)
+  
+  predgrid <- replicate_df(flat_grid, n_cn, range_vector) %>% st_drop_geometry()
+  predgrid[[time_cn]] <- max(df_surv[[time_cn]])
+  
+  predgrid <- predgrid %>%
+  mutate(across(starts_with("f"), as.factor))
+  
+  fit_list <- sdm_fit(fitted_model = m, df = df_surv, offset_col_name = offset_col_name,
+                      grid = predgrid, gridcell_dist = gridcell_dist, calc_index = FALSE,
+                      save_to_global = FALSE, se_fit_predict = TRUE, re_form_predict = NA)
+  
+  preds <- fit_list$preds$data %>% rename(log_est = est, log_se = est_se) %>%
+    mutate(log_est_upr = log_est + 1.96 * log_se,
+           log_est_lwr = log_est - 1.96 * log_se,
+           est = exp(log_est),
+           upr = exp(log_est_upr),
+           lwr = exp(log_est_lwr))
+  
+  p <- ggplot(preds, aes(x=.data[[n_cn]], y=log_est)) +
+    geom_line() + geom_point() + geom_ribbon(aes(ymin=log_est_lwr, ymax=log_est_upr), alpha = 0.3) +
+    labs(title="Log scale") +
+    theme_minimal()
+  
+  print(p)
+  
+  p1 <- ggplot(preds, aes(x=.data[[n_cn]], y=est)) +
+    geom_line() + geom_point() + geom_ribbon(aes(ymin=lwr, ymax=upr), alpha = 0.3) +
+    labs(title="Natural scale") +
+    theme_minimal()
+  
+  print(p1)
+  
+  p2 <- ggplot(preds, aes(x=.data[[n_cn]], y=est)) +
+    geom_line() + geom_point() +
+    labs(title="Natural scale w/o CI") +
+    theme_minimal()
+  
+  print(p2)
+}
+
+```
+
+# Depth values
+
+```{r depth_calcs, error=TRUE}
+df_surv_depth_mu <- mean(df_surv$Depth_mean)
+df_surv_depth_sd <- sd(df_surv$Depth_mean)
+
+z_vals <- sort(c(0, seq(min(df_surv$Depth_std), max(df_surv$Depth_std))))
+
+orig_vals <- df_surv_depth_mu + z_vals * df_surv_depth_sd
+
+
+depths_df <- data.frame(Depth_std = z_vals,
+                        Depth_m = orig_vals)
+
+gt(depths_df)
+```
+
+# Spatial predictions
+
+```{r spatialpredscal}
+
+if ("Depth_std" %in% num_covs){
+  predgrid <- replicate_df(base_grid, time_cn, unique(df_surv[[time_cn]])) %>%
+  mutate(
+    fYear = as.factor(.data[[time_cn]]),
+    Depth_std = (depth - mean(df_surv$Depth_mean)) / sd(df_surv$Depth_mean)
+  ) %>%
+  st_drop_geometry()
+} else {
+   predgrid <- replicate_df(base_grid, time_cn, unique(df_surv[[time_cn]])) %>%
+  mutate(
+    fYear = as.factor(.data[[time_cn]])) %>%
+  st_drop_geometry()
+}
+
+
+
+# Filter out unwanted factor covariates
+
+fact_covs_filtered <- fact_covs[ setdiff(names(fact_covs), "fYear") ]
+
+for (var_name in names(fact_covs_filtered)) {
+  predgrid <- replicate_df(predgrid, var_name, fact_covs_filtered[[var_name]])
+}
+
+# Filter out unwanted numeric covariates
+
+num_covs_filtered <- num_covs[ setdiff(names(num_covs), c("Depth_std", "depth", time_cn)) ]
+
+for (num_var_name in names(num_covs_filtered)) {
+  predgrid <- replicate_df(predgrid, num_var_name, num_covs_filtered[[num_var_name]])
+}
+
+fit_list <- sdm_fit(fitted_model = m, df = df_surv, offset_col_name = offset_col_name,
+                      grid = predgrid, gridcell_dist = gridcell_dist, calc_index = FALSE,
+                      save_to_global = FALSE, se_fit_predict = FALSE)
+
+spat_preds <- fit_list$preds$data
+
+if (hurdle){
+  spat_preds <- spat_preds %>% mutate(est = log(exp(est1)*exp(est2)))
+}
+
+zone <- floor((mean(df_surv$longitudestart) + 180) / 6) + 1
+utmCRS = paste("+proj=utm +zone=",zone," ellps=WGS84 +units=km",sep='')
+
+xy_coords <- spat_preds %>% st_as_sf(coords=c("lon","lat"),
+                                  remove=FALSE, crs="+proj=longlat +datum=WGS84") %>%
+  st_transform(crs = utmCRS) %>% st_coordinates()
+
+
+preds_xycoords <- bind_cols(spat_preds, xy_coords) %>% mutate(est = exp(est))
+
+mean_preds <- preds_xycoords %>% group_by(X,Y,lon,lat) %>% 
+  summarise(est_mean = mean(est),
+            .groups = "drop_last")
+
+diff_w_mean <- preds_xycoords %>% left_join(mean_preds) %>% 
+  mutate(
+    est_diff = est - est_mean,
+    est_diff_perc = est_diff/est_mean * 100)
+
+means_diffs_py <- diff_w_mean %>% group_by(startyear) %>% summarise(
+  mean_est_diff = mean(est_diff),
+  mean_est_diff_perc = mean(est_diff_perc),
+  sd_est_diff = sd(est_diff),
+  sd_est_diff_perc = sd(est_diff_perc)
+)
+
+```
+
+## Prediction grid
+
+```{r predgridplot}
+show_grid <- preds_xycoords[preds_xycoords[[time_cn]] == max(df_surv[[time_cn]]), ]
+
+ggOceanMaps::basemap(data=show_grid, crs=utmCRS, land.col = "whitesmoke") + 
+  geom_tile(data=show_grid, aes(x=X, y=Y, fill=depth)) +
+  scale_fill_gradientn(colors = c("blue", "turquoise","yellow","lightsalmon" ,"red"),
+                       values = scales::rescale(c(0,100,250,500,1000)),
+                       breaks = c(100, 250, 500, 1000)) +
+  theme_minimal()
+```
+
+## Yearly total spatial predictions
+
+```{r yearlytotspatpredsc, fig.height=70}
+
+ggOceanMaps::basemap(data = preds_xycoords, crs=utmCRS, land.col = "whitesmoke") + 
+  geom_tile(data = preds_xycoords, aes(x=X, y=Y, fill=est)) +
+  scale_fill_gradientn(colors = c("blue", "turquoise","yellow","lightsalmon" ,"red"),
+                       values = scales::rescale(c(0,2,4,6,8))) +
+  theme_minimal() + theme(legend.position = "top") + 
+  facet_wrap(as.formula(paste("~", time_cn)), ncol=1)
+
+```
+
+## Spatial mean estimates
+
+```{r spatmeanests}
+
+ggOceanMaps::basemap(data=mean_preds, crs=utmCRS, land.col = "whitesmoke") + 
+  geom_tile(data=mean_preds, aes(x=X, y=Y, fill=est_mean)) +
+  scale_fill_gradientn(colors = c("blue", "turquoise","yellow","lightsalmon" ,"red"),
+                       values = scales::rescale(c(0,2,4,6,8))) +
+  theme_minimal() + theme(legend.position = "top")
+
+```
+
+## Yearly percent difference from mean
+
+### Map
+```{r percdiffsspat, fig.height=70}
+
+ggOceanMaps::basemap(data=diff_w_mean, crs=utmCRS, land.col = "whitesmoke") + 
+  geom_tile(data=diff_w_mean, aes(x=X, y=Y, fill=est_diff_perc)) +
+  scale_fill_gradientn(colors = c("blue", "turquoise","white","lightsalmon" ,"red"),
+                       values = scales::rescale(c(-50,-5,0,5,50)),
+                       limits = c(-50, 50),
+                       breaks = c(-50,0,50),
+                       oob = scales::squish) +
+  theme_minimal() + theme(legend.position = "top") + 
+  facet_wrap(as.formula(paste("~", time_cn)), ncol=1)
+
+```
+
+### Table
+
+```{r percdifftable}
+
+gt(means_diffs_py) %>%
+  fmt_number(
+    columns = c(where(is.numeric), - all_of(time_cn)),
+    decimals = 2
+  )
+
+```
+
+### Plot
+
+```{r percdiffplot}
+
+ggplot(data=means_diffs_py, aes(x=.data[[time_cn]],y=mean_est_diff_perc)) + 
+  geom_line() + geom_point() +
+  labs(x="", y= "Mean yearly perc difference with total mean") +
+  theme_minimal()
+
+```
+
+```{r mesh, results='asis', eval=sp_in_model}
+
+writeLines(sprintf("\n\n## %s\n", "SPDE Mesh"))
+
+mesh <- m$spde$mesh
+locs_xy <- as.data.frame(m$spde$loc_xy)
+
+mesh_nodes_sf <- mesh$loc %>% as.data.frame() %>%
+  st_as_sf(coords = c("V1", "V2"), remove=FALSE, crs = utmCRS)
+
+
+ggOceanMaps::basemap(mesh_nodes_sf, crs = utmCRS, land.col = "#eeeac4",
+  lon.interval = 5) +
+  inlabru::gg(mesh, edge.color = "black") +
+  geom_point(data = locs_xy, aes(x=xkm, y=ykm), 
+             alpha = 0.3, color = "red", shape = 21) +
+  coord_sf(datum = st_crs(utmCRS),
+           expand = FALSE) +
+  scale_y_continuous(
+    "Latitude (UTM, km from the equator)",
+    breaks = seq(0,1e4,1e2)
+  ) +
+  scale_x_continuous(
+    "Longitude (UTM, km)",
+    breaks = seq(-1e3,1e4,1e2)
+  ) + 
+  scale_size_area() +
+  theme(legend.position = "none")
+
+```
+
+```{r spatialfield, results='asis', eval=sp_in_model}
+
+writeLines(sprintf("\n\n## %s\n", "Spatial random field"))
+
+spatial_field_df <- preds_xycoords[preds_xycoords[[time_cn]] == max(preds_xycoords[[time_cn]]),]
+
+if (hurdle){
+  
+  p <- ggOceanMaps::basemap(data=spatial_field_df, crs=utmCRS, land.col = "whitesmoke") + 
+  geom_tile(data=spatial_field_df, aes(x=X, y=Y, fill=omega_s1)) +
+  scale_fill_gradientn(colors = c("blue", "turquoise","yellow","lightsalmon" ,"red"),
+                       values = scales::rescale(c(0,2,4,6,8))) +
+  theme_minimal() + theme(legend.position = "top")
+  print(p)
+  
+  
+  p2 <- ggOceanMaps::basemap(data=spatial_field_df, crs=utmCRS, land.col = "whitesmoke") + 
+  geom_tile(data=spatial_field_df, aes(x=X, y=Y, fill=omega_s2)) +
+  scale_fill_gradientn(colors = c("blue", "turquoise","yellow","lightsalmon" ,"red"),
+                       values = scales::rescale(c(0,2,4,6,8))) +
+  theme_minimal() + theme(legend.position = "top")
+  print(p2)
+  
+} else {
+  
+  p <- ggOceanMaps::basemap(data=spatial_field_df, crs=utmCRS, land.col = "whitesmoke") + 
+  geom_tile(data=spatial_field_df, aes(x=X, y=Y, fill=omega_s)) +
+  scale_fill_gradientn(colors = c("blue", "turquoise","yellow","lightsalmon" ,"red"),
+                       values = scales::rescale(c(0,2,4,6,8))) +
+  theme_minimal() + theme(legend.position = "top")
+  print(p)
+}
+
+```
+
+```{r fixedeffects, results='asis', eval=sp_in_model, fig.height=70}
+
+writeLines(sprintf("\n\n## %s\n", "Fixed effects only"))
+
+if (hurdle){
+  p <- ggOceanMaps::basemap(data = preds_xycoords, crs=utmCRS, land.col = "whitesmoke") + 
+  geom_tile(data = preds_xycoords, aes(x=X, y=Y, fill=est_non_rf1)) +
+  scale_fill_gradientn(colors = c("blue", "turquoise","yellow","lightsalmon" ,"red"),
+                       values = scales::rescale(c(0,2,4,6,8))) +
+  theme_minimal() + theme(legend.position = "top") + 
+  facet_wrap(as.formula(paste("~", time_cn)), ncol=1)
+  print(p)
+  
+  p2 <- ggOceanMaps::basemap(data = preds_xycoords, crs=utmCRS, land.col = "whitesmoke") + 
+  geom_tile(data = preds_xycoords, aes(x=X, y=Y, fill=est_non_rf2)) +
+  scale_fill_gradientn(colors = c("blue", "turquoise","yellow","lightsalmon" ,"red"),
+                       values = scales::rescale(c(0,2,4,6,8))) +
+  theme_minimal() + theme(legend.position = "top") + 
+  facet_wrap(as.formula(paste("~", time_cn)), ncol=1)
+  print(p2)
+  
+} else {
+  p <- ggOceanMaps::basemap(data = preds_xycoords, crs=utmCRS, land.col = "whitesmoke") + 
+  geom_tile(data = preds_xycoords, aes(x=X, y=Y, fill=est_non_rf)) +
+  scale_fill_gradientn(colors = c("blue", "turquoise","yellow","lightsalmon" ,"red"),
+                       values = scales::rescale(c(0,2,4,6,8))) +
+  theme_minimal() + theme(legend.position = "top") + 
+  facet_wrap(as.formula(paste("~", time_cn)), ncol=1)
+  print(p)
+}
+
+
+```
+
+```{r srfchunk, results='asis', eval=srf_in_model, fig.height=70}
+
+writeLines(sprintf("\n\n## %s\n", "Spatiotemporal random fields"))
+
+if (hurdle){
+  p <- ggOceanMaps::basemap(data = preds_xycoords, crs=utmCRS, land.col = "whitesmoke") + 
+  geom_tile(data = preds_xycoords, aes(x=X, y=Y, fill=epsilon_st1)) +
+  scale_fill_gradientn(colors = c("blue", "turquoise","yellow","lightsalmon" ,"red"),
+                       values = scales::rescale(c(0,2,4,6,8))) +
+  theme_minimal() + theme(legend.position = "top") + 
+  facet_wrap(as.formula(paste("~", time_cn)), ncol=1)
+  print(p)
+  
+  p2 <- ggOceanMaps::basemap(data = preds_xycoords, crs=utmCRS, land.col = "whitesmoke") + 
+  geom_tile(data = preds_xycoords, aes(x=X, y=Y, fill=epsilon_st2)) +
+  scale_fill_gradientn(colors = c("blue", "turquoise","yellow","lightsalmon" ,"red"),
+                       values = scales::rescale(c(0,2,4,6,8))) +
+  theme_minimal() + theme(legend.position = "top") + 
+  facet_wrap(as.formula(paste("~", time_cn)), ncol=1)
+  print(p2)
+  
+} else {
+  p <- ggOceanMaps::basemap(data = preds_xycoords, crs=utmCRS, land.col = "whitesmoke") + 
+  geom_tile(data = preds_xycoords, aes(x=X, y=Y, fill=epsilon_st)) +
+  scale_fill_gradientn(colors = c("blue", "turquoise","yellow","lightsalmon" ,"red"),
+                       values = scales::rescale(c(0,2,4,6,8))) +
+  theme_minimal() + theme(legend.position = "top") + 
+  facet_wrap(as.formula(paste("~", time_cn)), ncol=1)
+  print(p)
+}
+
+
+
+```
