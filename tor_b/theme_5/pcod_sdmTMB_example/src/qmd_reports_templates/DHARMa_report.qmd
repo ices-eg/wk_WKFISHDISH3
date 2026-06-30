@@ -21,11 +21,12 @@ params:
   save_dharma_residuals: false
   save_dharma_simulations: false
   run_gam_chunk: false
+  run_sdmtmb_selftest_chunk: false
+  selftest_nsims: 10
+  meshcutoff: 10
 ---
 
-
-
-```{r params}
+```{r setup-parameters}
 # Access parameters
 model_name  <- params$model_name
 description <- params$m_description
@@ -35,15 +36,14 @@ model_pos_covariates <- params$m_pos_covariates
 nsims <- params$n_simulations
 save_dharma_res <- params$save_dharma_residuals
 save_dharma_sims <- params$save_dharma_simulations
+selftest_nsims <- params$selftest_nsims
+meshcutoff <- params$meshcutoff
 
-cat("Model:", model_name, "\n")
-cat("Model file:", model_file, "\n")
-cat("Survey data file:", df_surv_file, "\n")
-cat("Description:", description, "\n")
-
+# Default fig height value in case selftest doesnt run
+fig_height_selftest <- 1
 ```
 
-```{r load_packages}
+```{r load-libraries}
 library(glmmTMB)
 library(DHARMa)
 library(ggOceanMaps)
@@ -54,14 +54,33 @@ library(dplyr)
 library(tidyr)
 library(mgcv)
 library(sdmTMB)
+library(purrr)
 
 src_folder_location <- "src/"
+
 source(paste0(src_folder_location, "additional_quarto_funcs.R"))
 source(paste0(src_folder_location, "Variogram_function.R"))
 
 ```
 
-```{r collect_model}
+---
+
+# Report Summary
+
+**Model name**: `r model_name`
+
+**Model file**: `r model_file`
+
+**Data file**: `r df_surv_file`
+
+**Description**: `r description`
+
+**Number of DHARMa simulations**: `r nsims`
+
+
+
+
+```{r load-model-and-compute-residuals, results = 'asis'}
 df_surv <- load_object(df_surv_file)
 
 yearly_figs_h <- length(unique(df_surv$startyear)) * 5
@@ -73,15 +92,20 @@ if ("sdmTMB" %in% class(m)){
   Esqr <- dharma_residuals(simulated_response = s_mvn,
                            object = m,
                            return_DHARMa = TRUE)
-  print(paste0("Formula: ", as.character(m$formula)))
+  cat(sprintf("**Model formula**: `%s`\n\n", paste(deparse(m$formula[[1]]), collapse = " ")))
 } else{
   Esqr <- simulateResiduals(fittedModel = m, n = nsims, plot = F)
 }
 ```
 
 
+This report provides comprehensive model diagnostics using DHARMa (simulation-based residuals) 
+and conventional approaches. It evaluates model fit through distributional comparisons, spatial 
+patterns, and covariate residual relationships.
 
-```{r input_validation}
+---
+
+```{r validate-inputs}
 # ---- Helper for clean errors ----
 abort_render <- function(msg) {
   stop(paste0("\n❌ QUARTO VALIDATION ERROR:\n", msg), call. = FALSE)
@@ -114,11 +138,11 @@ if (length(missing_cols) > 0) {
 message("✅ All input checks passed")
 ```
 
+# Model Summary and Basic Diagnostics
 
+## Model Specification
 
-# Model Summary
-
-```{r modelsummary}
+```{r display-model-summary}
 #| message: true
 summary(m)
 
@@ -127,9 +151,13 @@ if ("sdmTMB" %in% class(m)){
 }
 ```
 
-# Conventional residuals()
+## Conventional Residuals
 
-```{r conventionalresiduals}
+Conventional residuals may be less reliable for non-normal models, but provide a quick diagnostic check.
+
+```{r plot-conventional-residuals}
+#| fig-cap: "Residuals vs fitted values with LOESS smoothing"
+#| label: fig-resids-vs-fitted
 
 if ("sdmTMB" %in% class(m)){
   conv_resids <- residuals(m, type = "mle-mvn")
@@ -149,23 +177,35 @@ ggplot(df_resid, aes(Fitted, Residuals)) +
   geom_smooth(method = "loess", se = FALSE, color = "blue") +
   geom_hline(yintercept = 0, color = "red", linewidth = 1) +
   theme_minimal(base_size = 13)
-
-```
-## Normal QQ Plot
-```{r conventionalqqplot}
-qqnorm(conv_resids);abline(0,1)
 ```
 
-# DHARMa simulations
+## Normal Q-Q Plot
 
-```{r dharmaexamples}
+```{r plot-conventional-qq}
+#| fig-cap: "Q-Q plot of conventional residuals"
+#| label: fig-qq-plot
+qqnorm(conv_resids); abline(0, 1)
+```
 
-# --- Extract the objects ---
-sims_Esqr        <- Esqr$simulatedResponse          # matrix sims per obs
+---
+
+# DHARMa Simulation-Based Diagnostics
+
+These plots visualize the model's posterior predictive distribution by comparing simulated 
+datasets from the model to the observed data. Simulation-based residuals are more powerful 
+than conventional residuals, especially for non-normal models.
+
+## Example Observations
+
+```{r visualize-simulated-distributions}
+#| fig-cap: "Posterior predictive distributions for selected observations"
+#| label: fig-simulated-dist
+
+sims_Esqr        <- Esqr$simulatedResponse
 fitted_Esqr      <- Esqr$fittedPredictedResponse
 observed_Esqr    <- Esqr$observedResponse
 
-# --- Select 4 rows: lowest, highest, two random positive ---
+# Select 4 rows: lowest, highest, two random positive
 idx_lowest  <- which.min(observed_Esqr)
 idx_highest <- which.max(observed_Esqr)
 positive_indices <- setdiff(which(observed_Esqr > 0),
@@ -173,40 +213,36 @@ positive_indices <- setdiff(which(observed_Esqr > 0),
 idx_random <- sample(positive_indices, 2)
 selected_examples <- c(idx_lowest, idx_highest, idx_random)
 
-# --- Transpose sims for selected rows ---
+# Transpose sims for selected rows
 sims_df_examples <- as.data.frame(t(sims_Esqr[selected_examples, , drop = FALSE]))
 colnames(sims_df_examples) <- paste0("row_", selected_examples)
 
-# --- Fitted + observed values for those rows ---
+# Fitted + observed values for those rows
 fitted_obs_df <- data.frame(
   obs_id   = paste0("row_", selected_examples),
   fitted   = fitted_Esqr[selected_examples],
   observed = observed_Esqr[selected_examples]
 )
 
-# --- Long format for ggplot ---
+# Long format for ggplot
 sims_long <- sims_df_examples %>%
   pivot_longer(cols = everything(),
                names_to = "obs_id",
                values_to = "y_sim")
 
-# --- Faceted histogram plot ---
+# Faceted histogram plot
 ggplot(sims_long, aes(x = y_sim)) +
   geom_histogram(bins = 30, color = "green", fill = "gray") +
-  
-  # Fitted prediction (red)
   geom_vline(data = fitted_obs_df,
              aes(xintercept = fitted),
              color = "red", linewidth = 1) +
-  
-  # Observed value (blue dashed)
   geom_vline(data = fitted_obs_df,
              aes(xintercept = observed),
              color = "blue", linewidth = 1, linetype = "dashed") +
-  
   facet_wrap(~ obs_id, scales = "free_x", ncol = 2) +
   labs(
-    title = "DHARMa simulations: fitted (red) and observed (blue) for selected rows",
+    title = "Simulations for selected rows",
+    subtitle = "Fitted (red) and observed (blue)",
     x = "Simulated response",
     y = "Count"
   ) +
@@ -218,176 +254,315 @@ if (save_dharma_sims){
   saveRDS(Esqr_data, 
           file = paste0(dirname(model_file),"/dharma_sims_",model_name,".rds"))
 }
-
 ```
 
-## Simulation means
+## Posterior Predictive Checks (Turing Test)
 
-```{r dharmasimmeans}
+Can you spot which distribution (A, B, C, or D) represents the actual observed data?
 
-sim_means <- data.frame(sim_mus = apply(sims_Esqr,2,mean))
+```{r prepare-turing-test}
+eg_sims <- sample(nsims, 3)
+
+turing_letters <- c("A", "B", "C", "D")
+
+obs_letter <- sample(turing_letters, 1)
+
+sims_letters <- setdiff(turing_letters, obs_letter)
+
+turing_examples <- as.data.frame(sims_Esqr[, eg_sims, drop = FALSE])
+
+colnames(turing_examples) <- sims_letters
+
+turing_examples[[obs_letter]] <- observed_Esqr
+
+turing_examples <- turing_examples %>% select(sort(names(.))) %>%
+  mutate(latitudestart = df_surv$latitudestart,
+         longitudestart = df_surv$longitudestart,
+         startyear = df_surv$startyear)
+
+turing_long <- turing_examples %>%
+  pivot_longer(all_of(turing_letters))
+```
+
+### ECDF Comparison
+
+```{r plot-turing-ecdf-linear}
+#| fig-cap: "Empirical cumulative distribution functions (linear scale)"
+#| label: fig-turing-ecdf-linear
+
+ggplot(turing_long, aes(x = value, group = name, color = name)) +
+  stat_ecdf(alpha = 0.5, size = 0.5) + 
+  theme_minimal(base_size = 13)
+```
+
+### ECDF with Log Transform
+
+```{r plot-turing-ecdf-log}
+#| fig-cap: "Empirical cumulative distribution functions (log scale)"
+#| label: fig-turing-ecdf-log
+
+ggplot(turing_long, aes(x = value, group = name, color = name)) +
+  stat_ecdf(alpha = 0.5, size = 0.5) +
+  scale_x_continuous(
+      trans  = "log1p",
+      name   = "Response (log1p scale)"
+  ) + 
+  theme_minimal(base_size = 13)
+```
+
+### Posterior Predictive Density Check
+
+```{r plot-turing-density}
+#| fig-cap: "Posterior predictive density (log-transformed)"
+#| label: fig-turing-density
+
+trans <- \(x) log(x + 0.01)
+trans_name <- "log(x + 0.01)"
+  
+ggplot() +
+  geom_density(
+    data = turing_long,
+    mapping = aes(x = trans(value), group = name, color = name),
+    alpha = 0.1,
+    fill = NA
+  ) +
+  labs(
+    title = "Posterior Predictive Density Check",
+    subtitle = paste("Transformation:", trans_name),
+    x = paste("Transformed response (", trans_name, ")", sep = ""),
+    y = "Density"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+### Boxplot Comparison
+
+```{r plot-turing-boxplots}
+#| fig-cap: "Boxplot comparison of datasets"
+#| label: fig-turing-boxplots
+
+ggplot(turing_long, aes(x = value, y = name, group = name, color = name)) +
+  geom_boxplot() + 
+  theme_minimal(base_size = 13) + 
+  theme(legend.position = "none")
+```
+
+### Spatial Distribution Maps
+
+```{r plot-turing-maps, fig.height=yearly_figs_h/2.3}
+#| fig-cap: "Spatial distribution of datasets by year"
+#| label: fig-turing-maps
+
+basemap(data = turing_long, crs = 4326, land.col = "whitesmoke") +
+  geom_point(data = turing_long,
+             aes(x = longitudestart, 
+                 y = latitudestart,
+                 col = value), size = 2.5, alpha = 0.8) +
+  scale_colour_gradientn(colours = c("blue", "turquoise","yellow","lightsalmon","red"), 
+                         values = scales::rescale(quantile(turing_long$value, probs = seq(0, 1, length.out = 5)))) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        panel.background = element_rect(fill = "white", colour = NA)) +
+  labs(color = "Value") +
+  facet_wrap(vars(startyear, name), ncol = 4)
+```
+
+### Answer
+
+**Observed data: `r obs_letter`**
+
+## Simulated vs Observed Means
+
+```{r plot-simulated-means}
+#| fig-cap: "Distribution of simulated dataset means vs observed mean"
+#| label: fig-simulated-means
+
+sim_means <- data.frame(sim_mus = apply(sims_Esqr, 2, mean))
 obs_mean <- mean(observed_Esqr)
-fitted_mean <- mean(fitted_Esqr)
 
 ggplot() + 
-  geom_histogram(data=sim_means, aes(x=sim_mus), fill="gray", color="black") +
-  geom_vline(xintercept = quantile(sim_means$sim_mus,0.5),
+  geom_histogram(data = sim_means, aes(x = sim_mus), fill = "gray", color = "black") +
+  geom_vline(xintercept = quantile(sim_means$sim_mus, 0.5),
              color = "black", linewidth = 0.5) +
-  geom_vline(xintercept = quantile(sim_means$sim_mus,0.025),
+  geom_vline(xintercept = quantile(sim_means$sim_mus, 0.025),
              color = "black", linewidth = 0.5, linetype = "dashed") +
-  geom_vline(xintercept = quantile(sim_means$sim_mus,0.975),
+  geom_vline(xintercept = quantile(sim_means$sim_mus, 0.975),
              color = "black", linewidth = 0.5, linetype = "dashed") +
-  
-  # Fitted prediction (red)
-  geom_vline(xintercept = fitted_mean,
-             color = "red", linewidth = 1) +
-  
-  # Observed value (blue dashed)
   geom_vline(xintercept = obs_mean,
              color = "blue", linewidth = 1, linetype = "dashed") +
-  labs(x="Dataset mean") +
-  theme_minimal()
-
-
+  labs(x = "Dataset mean") +
+  theme_minimal(base_size = 13)
 ```
 
-# Simulated vs Observed distributions
+## Simulated vs Observed Distributions
 
-```{r simvsobsdistributions}
+```{r plot-density-identity}
+#| fig-cap: "Posterior predictive density check (identity scale)"
+#| label: fig-pred-check-identity
+prediction_check_density_jebyrnes(Esqr)
+```
 
+```{r plot-density-log}
+#| fig-cap: "Posterior predictive density check (log scale)"
+#| label: fig-pred-check-log
+prediction_check_density_jebyrnes(Esqr, trans = \(x) log(x+0.01))
+```
+
+```{r plot-response-distribution}
+#| fig-cap: "Response distribution comparison"
+#| label: fig-response-dist
 sdm_plot_response_distribution(Esqr, theme = theme_minimal())
-
 ```
 
-# Simulated vs Observed ECDFs
+### ECDF Distribution
 
-```{r ecdfs}
-
+```{r plot-ecdf-distribution}
+#| fig-cap: "Empirical cumulative distribution function by year"
+#| label: fig-ecdf-dist
 sdm_plot_ecdf_distribution(Esqr,
                            df = df_surv,
                            year_variable = "startyear",
-                           by_year   = F,
-                           n_sim_lines   = nsims,
+                           by_year = F,
+                           n_sim_lines = nsims,
                            show_sim_lines = T,
-                           show_envelope  = F,
+                           show_envelope = F,
                            log_trans = TRUE,
-                           theme     = theme_minimal())
-
-
+                           theme = theme_minimal())
 ```
 
+---
 
+# General DHARMa Tests
 
-# General DHARMa plots
-
-```{r dharmatestresidualsplot}
+```{r dharma-diagnostic-tests}
+#| fig-cap: "Comprehensive DHARMa diagnostic plots"
+#| label: fig-dharma-tests
 testResiduals(Esqr)
-
 ```
-## QQ plot
 
-```{r qqplot}
+## QQ Plot
+
+```{r plot-uniformity-qq}
+#| fig-cap: "Q-Q plot for uniformity of DHARMa residuals"
+#| label: fig-dharma-qq
 plotQQunif(Esqr, testUniformity = TRUE, 
            testOutliers = TRUE, testDispersion = T)
 ```
 
+## Dispersion Test
 
-## Dispersion test
-
-```{r dispersiontest}
+```{r test-dispersion}
+#| fig-cap: "Dispersion test results"
+#| label: fig-dispersion-test
 testDispersion(Esqr, plot=TRUE)
 ```
 
-```{r manualdispersionplot}
+```{r plot-scaled-variance}
+#| fig-cap: "Residual variance scaled by mean simulated residual variance"
+#| label: fig-scaled-variance
 
-obs_pred <- observed_Esqr-fitted_Esqr
-
-sims_pred <- sims_Esqr-fitted_Esqr
-
+obs_pred <- observed_Esqr - fitted_Esqr
+sims_pred <- sims_Esqr - fitted_Esqr
 row_vars <- apply(sims_pred, 2, var)
-
-sc_var_obs_pred <- var(obs_pred)/mean(row_vars)
-
-sc_vars_sims_pred <- row_vars/mean(row_vars)
-
-sc_vars_sims_pred_df <- data.frame(x=sc_vars_sims_pred)
+sc_var_obs_pred <- var(obs_pred) / mean(row_vars)
+sc_vars_sims_pred <- row_vars / mean(row_vars)
+sc_vars_sims_pred_df <- data.frame(x = sc_vars_sims_pred)
 
 ggplot() +
-  geom_histogram(data=sc_vars_sims_pred_df ,aes(x=x), fill="gray", color="black", bins=35) +
-  geom_vline(xintercept = sc_var_obs_pred, color="red", linewidth = 1) +
-  labs(x="Residual variance scaled by mean simulated residual variance",
-       y="Frequency") +
-  theme_minimal()
+  geom_histogram(data = sc_vars_sims_pred_df, aes(x = x), fill = "gray", color = "black", bins = 35) +
+  geom_vline(xintercept = sc_var_obs_pred, color = "red", linewidth = 1) +
+  labs(x = "Residual variance scaled by mean simulated residual variance",
+       y = "Frequency") +
+  theme_minimal(base_size = 13)
 ```
 
+## Outlier Test
 
-## Outlier test
-
-```{r outliertest}
+```{r test-outliers}
+#| fig-cap: "Outlier test results"
+#| label: fig-outlier-test
 testOutliers(Esqr)
 ```
 
-# DHARMA residuals vs predicted
+---
+
+# DHARMa Residuals vs Fitted
 
 ## Ranked
 
-```{r residsvspredsranked}
-plotResiduals(Esqr) 
+```{r residuals-vs-fitted-ranked}
+#| fig-cap: "DHARMa residuals vs fitted values (ranked)"
+#| label: fig-resids-ranked
+plotResiduals(Esqr)
 ```
 
-## Not ranked
+## Not Ranked
 
-```{r residsvspredsnotranked}
-plotResiduals(Esqr, rank = F) 
+```{r residuals-vs-fitted-unranked}
+#| fig-cap: "DHARMa residuals vs fitted values (unranked)"
+#| label: fig-resids-unranked
+plotResiduals(Esqr, rank = F)
 ```
 
-## Homoscedasticity test
+## Homoscedasticity Test
 
-```{r absdevtest}
-plotResiduals(Esqr, absoluteDeviation = T) 
+```{r test-homoscedasticity}
+#| fig-cap: "Absolute deviation from mean (homoscedasticity test)"
+#| label: fig-homoscedasticity
+plotResiduals(Esqr, absoluteDeviation = T)
 ```
+
+---
 
 # Zero Inflation
 
-```{r zeroinflation}
+```{r test-zero-inflation}
+#| fig-cap: "Zero inflation test results"
+#| label: fig-zero-inflation
 testZeroInflation(Esqr)
 ```
 
+---
 
+# Residuals vs Covariates
 
-# Residuals against covariates
-Covariates may or may not be included in the model (go to model summary to check).
+Covariates may or may not be included in the model (see Report Summary for details).
 
-```{r residsagainstcovs, results='asis'}
+Covariates plotted: `r paste(model_pos_covariates, collapse = ", ")`
 
+```{r residuals-vs-covariates}
+#| fig-cap: "Residuals vs covariates"
+#| label: fig-residuals-vs-covariates
 
 for (covar_name in model_pos_covariates) {
-
-  # pull the variable from the dataset
+ 
+  # Get the covariate values
   covar_values <- df_surv[[covar_name]]
-
-  # print a true Quarto subheader (must use writeLines + results='asis')
-  writeLines(sprintf("\n\n## %s\n", covar_name))
-
+  
+  # Test and plot based on type
   if (is.factor(covar_values)) {
-
-    # factor version: DHARMa rewrites axis, so use mtext()
     testCategorical(
       Esqr,
       catPred = covar_values
     )
+    legend("bottom", # Nasty trick to show covar_name in the plot
+       inset = c(-0.3),
+       legend = c(covar_name),
+       xpd = TRUE,
+       x.intersp = 10,
+       y.intersp = 1,
+       adj = 2)
 
   } else {
-
-    # numeric version — ranked
+    # Ranked residuals
     plotResiduals(
       Esqr,
       form = covar_values,
       rank = TRUE,
       xlab = covar_name
     )
-
-    # numeric version — unranked
+    
+    # Unranked residuals
     plotResiduals(
       Esqr,
       form = covar_values,
@@ -396,12 +571,14 @@ for (covar_name in model_pos_covariates) {
     )
   }
 }
-
 ```
 
-# Spatial diagnostics
 
-```{r spatialsetup, eval=params$run_spatial_chunks}
+---
+
+# Spatial Diagnostics
+
+```{r prepare-spatial-data, eval=params$run_spatial_chunks}
 df_surv <- df_surv %>% mutate(dres = residuals(Esqr),
                               fitted = fitted_Esqr,
                               observed = observed_Esqr)
@@ -426,39 +603,33 @@ if (save_dharma_res){
 }
 ```
 
+## Residuals Spatial Distribution
 
-
-
-## Residuals spatial distribution
-
-```{r resspatialdistr, fig.height=yearly_figs_h, eval=params$run_spatial_chunks}
+```{r map-residuals-by-year, fig.height=yearly_figs_h, eval=params$run_spatial_chunks}
+#| fig-cap: "Spatial distribution of DHARMa residuals by year"
+#| label: fig-residuals-map
 
 basemap(data = df_surv, crs = 4326, land.col = "whitesmoke") +
   geom_point(data = df_surv,
              aes(x = longitudestart, 
                  y = latitudestart,
-                 col = dres),size = 2.5, alpha = 0.8)  +
-  
-  scale_colour_gradientn(colours = c("blue", "turquoise","yellow","lightsalmon" ,"red"), 
+                 col = dres), size = 2.5, alpha = 0.8) +
+  scale_colour_gradientn(colours = c("blue", "turquoise","yellow","lightsalmon","red"), 
                          values = c(0, 0.2, 0.4, 0.6, 0.8, 1),
                          limits = c(0, 1)) +
   theme_minimal() +
   theme(legend.position = "bottom",
-        panel.background = element_rect(fill = "white", colour = NA)
-        
-  ) +
-  labs(color="DHARMa residuals") +
+        panel.background = element_rect(fill = "white", colour = NA)) +
+  labs(color = "DHARMa residuals") +
   facet_wrap(~ startyear, ncol=1)
-
 ```
 
-## Spatial autocorrelation
+## Spatial Autocorrelation
 
-```{r spatialautocorrelation, eval=params$run_spatial_chunks}
+```{r plot-morans-i, eval=params$run_spatial_chunks}
 #| echo: false
-#| message: false
-#| warning: false
-#| results: 'hide'
+#| fig-cap: "Moran's I test for spatial autocorrelation by year"
+#| label: fig-morans-i
 
 res_autocor_df <- check_res_spat_autocor(df_surv_sf) %>% 
   mutate(fYear = as.factor(startyear),
@@ -470,67 +641,174 @@ ggplot(res_autocor_df) +
   geom_col(aes(x=fYear, y=MoransI_diff, fill = as.factor(signif))) + 
   geom_text(aes(x=fYear, y=MoransI_diff+0.005, label = p_val_r), angle = 90, hjust = 0) +
   labs(x="", y= "Moran's I score", fill = "p value < 0.05") +
-  theme_minimal() +
+  theme_minimal(base_size = 13) +
   theme(axis.text.x = element_text(angle = -45, hjust = 0))
-
 ```
 
-## Yearly variograms
+## Yearly Variograms
 
-```{r variogramscalculations, eval=params$run_spatial_chunks}
+```{r calculate-variograms, eval=params$run_spatial_chunks}
 #| echo: false
 #| message: false
 #| warning: false
 #| results: 'hide'
-#| fig.show: "hide"
+#| fig-show: "hide"
 
-fitted_autovars_obj <- fit_autovars(sf_data =  df_surv_sf,
+fitted_autovars_obj <- fit_autovars(sf_data = df_surv_sf,
                                     response_column = "dres")
 ```
 
-
-```{r variogramsplots, eval=params$run_spatial_chunks}
+```{r plot-yearly-variograms, eval=params$run_spatial_chunks}
+#| fig-cap: "Variograms by year"
+#| label: fig-yearly-variograms
 plot_autovars(fitted_autovars_obj[[1]])
 ```
 
-## Combined variograms
+## Combined Variograms
 
-```{r variogramsplotcombined, eval=params$run_spatial_chunks}
+```{r plot-combined-variograms, eval=params$run_spatial_chunks}
+#| fig-cap: "Combined variogram for all years"
+#| label: fig-combined-variograms
 
 ggplot() +
   geom_point(data=fitted_autovars_obj[[2]], 
              aes(x=dist, y=gamma, col=as.factor(startyear))) +
-  
   geom_line(data=fitted_autovars_obj[[3]], 
             aes(x=dist, y=gamma, col=as.factor(startyear))) +
-  
-  labs(x="Distance (km)", y="Semi-variance (gamma)", color="") +
-  #coord_cartesian(ylim = c(0,0.15)) + # If some year goes crazy
-  theme_minimal()
-
+  labs(x="Distance (km)", y="Semi-variance (gamma)", color="Year") +
+  theme_minimal(base_size = 13)
 ```
 
-## Estimated ranges
+## Estimated Ranges
 
-```{r rangesplot, eval=params$run_spatial_chunks}
+```{r plot-spatial-ranges, eval=params$run_spatial_chunks}
+#| fig-cap: "Estimated spatial correlation ranges by year and variogram model"
+#| label: fig-spatial-ranges
 
 ggplot() +
-  
   geom_col(data=fitted_autovars_obj[[4]], 
-             aes(x=as.factor(startyear), y=range, fill=model)) +
+           aes(x=as.factor(startyear), y=range, fill=model)) +
   
+geom_label(data = fitted_autovars_obj[[4]],
+             aes(x = as.factor(startyear),
+                 y = 450,
+                 label = round(range, 1)),
+                 position = position_dodge(width = 0.9),
+             size = 4,
+             angle = 90) + 
+
   labs(x="", y="Spatial correlation range (km)", fill="Variogram \nmodel") + 
   coord_cartesian(ylim=c(0,500)) +
-  theme_minimal() +
+  theme_minimal(base_size = 13) +
   theme(axis.text.x = element_text(angle = -45, hjust = 0))
-
 ```
 
+---
 
-# Model specific diagnostics 
+# Additional Checks
 
-```{r gamcheck, eval=params$run_gam_chunk}
+```{r gam-checks, eval=params$run_gam_chunk, results='asis'}
+
+writeLines(sprintf("\n\n## GAM Concurvity\n"))
+
 gam.check(m)
 concurvity(m, full=TRUE)
 ```
 
+```{r sdmtmb-self-test-setup, eval=params$run_sdmtmb_selftest_chunk, results='asis'}
+
+writeLines(sprintf("\n\n## sdmTMB Self-Test\n"))
+
+writeLines(sprintf("\n\n %s\n", paste("N self testing simulations:", selftest_nsims)))
+
+writeLines(sprintf("\n\n %s\n", paste("Mesh cutoff:", meshcutoff)))
+
+selftest_sims <- sample(nsims, selftest_nsims)
+
+selftest_examples <- as.data.frame(sims_Esqr[, selftest_sims, drop = FALSE])
+
+colnames(selftest_examples) <- seq(selftest_nsims)
+
+resp_var <- sub("^([^[:space:]]+).*", "\\1", deparse(m$formula[[1]]))
+
+mesh <- make_mesh(df_surv, xy_cols = c("xkm", "ykm"), cutoff = meshcutoff)
+
+selftest_results <- map_dfr(seq_len(selftest_nsims), function(i) {
+  
+  df_tmp <- df_surv
+  df_tmp[[resp_var]] <- selftest_examples[, i]
+  
+  refit_m <- tryCatch({
+    
+    sdmTMB(
+      formula = formula(m),
+      data = df_tmp,
+      offset = m$offset,
+      mesh = mesh,
+      family = m$family,
+      spatial = m$spatial,
+      spatiotemporal = m$spatiotemporal,
+      time_varying = m$time_varying,
+      time_varying_type = m$time_varying_type,
+      time = "startyear",
+      control = sdmTMBcontrol(
+        eval.max = 5000,
+        iter.max = 4000,
+        nlminb_loops = 3
+      )
+    )
+    
+  }, error = function(e) {
+    
+    message(sprintf("Simulation %s failed: %s", i, e$message))
+    return(NULL)
+    
+  })
+  
+  if (is.null(refit_m)) return(NULL)
+  
+  params_tmp <- bind_rows(
+    tidy(refit_m),
+    tidy(refit_m, effects = "ran_pars"),
+    tidy(refit_m, effects = "ran_vals"),
+    tidy(refit_m, effects = "ran_vcov")
+  ) %>%
+    mutate(sim = i)
+  
+  params_tmp
+  
+})
+
+params_m <- bind_rows(
+    tidy(m),
+    tidy(m, effects = "ran_pars"),
+    tidy(m, effects = "ran_vals"),
+    tidy(m, effects = "ran_vcov")
+  ) %>%
+    mutate(sim = 0)
+
+selftest_results <- bind_rows(selftest_results, params_m) %>% arrange(sim)
+
+fig_height_selftest <- 5 * length(unique(selftest_results$term))
+```
+
+```{r plot-selftest-results, eval=params$run_sdmtmb_selftest_chunk, fig.height=fig_height_selftest}
+#| fig-cap: "Parameter estimates across self-test simulations (0 = original model)"
+#| label: fig-selftest-params
+ggplot(selftest_results, aes(x = sim, y = estimate, color = factor(sim))) +
+  geom_point() + geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  geom_hline(data = selftest_results %>% filter(sim == 0), 
+    aes(yintercept = conf.low), color = "black", linetype = "dashed") +
+  geom_hline(data = selftest_results %>% filter(sim == 0), 
+  aes(yintercept = conf.high), color = "black", linetype = "dashed") +
+  scale_x_discrete() +
+  labs(x = "", y = "Estimate", color = "Simulation (0 = original)",
+  title = "Self-test results") +
+  theme_minimal(base_size = 13) + 
+  facet_wrap(~ term, scales = "free_y", ncol = 1) +
+  theme(legend.position = "top")
+```
+
+---
+
+*Report generated on `r Sys.time()`*

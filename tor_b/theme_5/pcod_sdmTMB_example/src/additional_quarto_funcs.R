@@ -49,6 +49,51 @@ rTweedie <- function(mu, w, sig, p = NULL, ..., phi = NULL) {
   )
 }
 
+prediction_check_density_jebyrnes <- function(Esqr, trans = identity, ...) {
+  
+  # Prepare data
+  sims <- Esqr$simulatedResponse |>
+    as.data.frame() |>
+    tidyr::pivot_longer(everything())
+  
+  obs <- data.frame(x = Esqr$observedResponse)
+  
+  # Try to extract transformation name
+  trans_name <- tryCatch({
+    deparse(substitute(trans))
+  }, error = function(e) {
+    "custom transformation"
+  })
+  
+  # Build plot
+  p1 <- ggplot() +
+    geom_density(
+      data = sims,
+      mapping = aes(x = trans(value), group = name),
+      alpha = 0.1,
+      fill = NA,
+      color = "gray"
+    ) +
+    geom_density(
+      data = obs,
+      mapping = aes(x = trans(x)),
+      alpha = 0.1,
+      fill = NA,
+      color = "blue"
+    ) +
+    labs(
+      title = "Posterior Predictive Density Check",
+      subtitle = paste(
+        "Transformation:", trans_name
+      ),
+      x = paste("Transformed response (", trans_name, ")", sep = ""),
+      y = "Density"
+    ) +
+    theme_minimal()
+  
+  return(p1)
+}
+
 sdm_plot_response_distribution <- function(resids,
                                            n_sample  = 5000,
                                            log_trans = TRUE,
@@ -85,7 +130,7 @@ sdm_plot_response_distribution <- function(resids,
     x_scale <- ggplot2::scale_x_continuous(name = "Response (catch weight)")
   }
   
-  fill_vals <- c("Observed" = "grey40", "Simulated" = "steelblue")
+  fill_vals <- c("Observed" = "blue", "Simulated" = "gray")
   
   # density of positive values
   p_pos <- ggplot2::ggplot(
@@ -97,7 +142,7 @@ sdm_plot_response_distribution <- function(resids,
     ggplot2::scale_y_continuous(name = "Density") +
     ggplot2::scale_fill_manual(values = fill_vals) +
     ggplot2::labs(
-      title    = "Observed vs simulated: positive values",
+      title    = "Observed vs simulated: only positive values",
       subtitle = if (log_trans) "spacing: log(1 + x), labels: original scale" else NULL,
       fill     = ""
     ) +
@@ -204,7 +249,7 @@ sdm_plot_ecdf_distribution <- function(resids,
       geom_ribbon(
         data = df_env,
         aes(x = x, ymin = lower, ymax = upper),
-        fill = "steelblue",
+        fill = "gray",
         alpha = 0.25
       )
   }
@@ -215,7 +260,7 @@ sdm_plot_ecdf_distribution <- function(resids,
       geom_line(
         data = df_sim_lines,
         aes(x = x, y = ecdf, group = sim_id),
-        color = "steelblue",
+        color = "gray",
         alpha = 0.2,
         linewidth = 0.6
       )
@@ -227,7 +272,7 @@ sdm_plot_ecdf_distribution <- function(resids,
       stat_ecdf(
         data = df_obs,
         aes(x = value, group = !!year_sym),
-        color = "grey60",
+        color = "lightblue",
         alpha = 0.5,
         size = 0.6
       )
@@ -238,7 +283,7 @@ sdm_plot_ecdf_distribution <- function(resids,
     stat_ecdf(
       data = df_obs,
       aes(x = value),
-      color = "black",
+      color = "blue",
       size = 1.2
     )
   
@@ -248,15 +293,13 @@ sdm_plot_ecdf_distribution <- function(resids,
     labs(
       y     = "F(x)",
       title = "Posterior predictive ECDF check",
-      subtitle = "Black = observed | Blue = DHARMa simulations"
+      subtitle = "Gray = DHARMa simulations | Blue = Observed"
     ) +
     theme
   
   return(p)
 }
 
-
-# Tweedie variance model comparison ####
 
 tweedie_variance_comp <- function(model_names, model_files) {
   
@@ -343,128 +386,3 @@ tweedie_variance_comp <- function(model_names, model_files) {
   return(p_cdf)
 }
 
-# Tweedie variance and ecdf comparison ####
-
-tweedie_variance_ecdf_comp <- function(model_names, model_files,
-                                  df, response_variable,
-                                  year_variable = "startyear") {
-  
-  library(statmod)
-  library(ggplot2)
-  library(dplyr)
-  library(purrr)
-  library(rlang)
-  
-  # NSE helpers
-  response_var <- sym(response_variable)
-  year_var     <- sym(year_variable)
-  
-  # Load models
-  ms <- setNames(
-    lapply(model_files, function(m) {
-      e <- new.env()
-      nm <- load_object(m)
-      nm
-    }),
-    model_names
-  )
-  
-  # Compute overall mean
-  mu <- mean(df[[response_variable]], na.rm = TRUE)
-  
-  # Extract model parameters
-  param_df <- map_dfr(names(ms), function(model_name) {
-    
-    model <- ms[[model_name]]
-    pars  <- model$model$par
-    
-    phi <- exp(pars["ln_phi"])
-    p   <- 1 + plogis(pars["thetaf"])
-    
-    data.frame(
-      model = model_name,
-      phi = phi,
-      p = p
-    )
-  })
-  
-  # Subtitle text
-  subtitle_text <- param_df %>%
-    mutate(txt = sprintf("%s: phi = %.2f, p = %.2f", model, phi, p)) %>%
-    pull(txt) %>%
-    paste(collapse = "  \n")
-  
-  # Build x grid
-  x <- exp(seq(
-    log(1e-4),
-    log(max(df[[response_variable]], na.rm = TRUE) * 3),
-    length.out = 400
-  ))
-  
-  # Model CDF data
-  plot_model <- map_dfr(names(ms), function(model_name) {
-    
-    model <- ms[[model_name]]
-    pars  <- model$model$par
-    
-    phi <- exp(pars["ln_phi"])
-    p   <- 1 + plogis(pars["thetaf"])
-    
-    cdf <- ptweedie(x, mu = mu, phi = phi, power = p)
-    
-    data.frame(
-      x = x,
-      cdf = cdf,
-      model = model_name
-    )
-  })
-  
-  # Plot
-  p <- ggplot() +
-    
-    # ECDF by year (grey)
-    stat_ecdf(
-      data = df,
-      aes(x = !!response_var, group = !!year_var),
-      color = "grey60",
-      alpha = 0.5,
-      size = 0.6
-    ) +
-    
-    # Overall ECDF (black)
-    stat_ecdf(
-      data = df,
-      aes(x = !!response_var),
-      color = "black",
-      size = 1
-    ) +
-    
-    # Tweedie model CDFs
-    geom_line(
-      data = plot_model,
-      aes(x = x, y = cdf, color = model),
-      size = 1.1
-    ) +
-    
-    scale_x_continuous(trans = "log1p") +
-    
-    coord_cartesian(
-      xlim = c(0, max(df[[response_variable]], na.rm = TRUE))
-    ) +
-    
-    labs(
-      x = paste0(response_variable, " (log1p scale)"),
-      y = "F(x)",
-      color = "Model",
-      title = "Empirical vs Tweedie CDF comparison",
-      subtitle = paste0(
-        "Mean used: ", round(mu, 2), "\n",
-        subtitle_text
-      )
-    ) +
-    
-    theme_minimal() +
-    theme(legend.position = "top")
-  
-  return(p)
-}
