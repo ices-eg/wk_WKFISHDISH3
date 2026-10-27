@@ -6,6 +6,10 @@ format:
     toc: true
     toc-depth: 3
     toc-expand: true
+  docx: default
+  pdf:
+    toc: true
+    toc-depth: 3
 execute:
   echo: false
   warning: false
@@ -24,6 +28,7 @@ params:
   run_sdmtmb_selftest_chunk: false
   selftest_nsims: 10
   meshcutoff: 10
+  src_folder: "src/"
 ---
 
 ```{r setup-parameters}
@@ -41,6 +46,11 @@ meshcutoff <- params$meshcutoff
 
 # Default fig height value in case selftest doesnt run
 fig_height_selftest <- 1
+
+# Word and PDF pages cannot hold very tall figures, so cap the height (inches)
+# for those formats. HTML scrolls, so it is left uncapped.
+max_fig_h <- if (isTRUE(knitr::pandoc_to() %in% c("docx", "latex", "pdf"))) 8.5 else Inf
+cap_h <- function(h) min(h, max_fig_h)
 ```
 
 ```{r load-libraries}
@@ -56,7 +66,8 @@ library(mgcv)
 library(sdmTMB)
 library(purrr)
 
-src_folder_location <- "src/"
+# Folder with the helper scripts, relative to the render's working directory
+src_folder_location <- params$src_folder
 
 source(paste0(src_folder_location, "additional_quarto_funcs.R"))
 source(paste0(src_folder_location, "Variogram_function.R"))
@@ -349,7 +360,7 @@ ggplot(turing_long, aes(x = value, y = name, group = name, color = name)) +
 
 ### Spatial Distribution Maps
 
-```{r plot-turing-maps, fig.height=yearly_figs_h/2.3}
+```{r plot-turing-maps, fig.height=cap_h(yearly_figs_h/2.3)}
 #| fig-cap: "Spatial distribution of datasets by year"
 #| label: fig-turing-maps
 
@@ -605,7 +616,7 @@ if (save_dharma_res){
 
 ## Residuals Spatial Distribution
 
-```{r map-residuals-by-year, fig.height=yearly_figs_h, eval=params$run_spatial_chunks}
+```{r map-residuals-by-year, fig.height=cap_h(yearly_figs_h), eval=params$run_spatial_chunks}
 #| fig-cap: "Spatial distribution of DHARMa residuals by year"
 #| label: fig-residuals-map
 
@@ -792,7 +803,7 @@ selftest_results <- bind_rows(selftest_results, params_m) %>% arrange(sim)
 fig_height_selftest <- 5 * length(unique(selftest_results$term))
 ```
 
-```{r plot-selftest-results, eval=params$run_sdmtmb_selftest_chunk, fig.height=fig_height_selftest}
+```{r plot-selftest-results, eval=params$run_sdmtmb_selftest_chunk, fig.height=cap_h(fig_height_selftest)}
 #| fig-cap: "Parameter estimates across self-test simulations (0 = original model)"
 #| label: fig-selftest-params
 ggplot(selftest_results, aes(x = sim, y = estimate, color = factor(sim))) +

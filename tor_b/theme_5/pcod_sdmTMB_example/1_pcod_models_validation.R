@@ -7,7 +7,7 @@ setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 #' and helper functions
 src_folder_location <- "src/"
 
-source(paste0(src_folder_location, "0_shrimp_setup.R"))
+source(paste0(src_folder_location, "0_setup.R"))
 source(paste0(src_folder_location, "Variogram_function.R"))
 source(paste0(src_folder_location, "1_survey_SDMfit_functions.R"))
 source(paste0(src_folder_location, "additional_quarto_funcs.R"))
@@ -296,6 +296,33 @@ quarto_render(
   output_file = paste0(
     model_full_name,
     ".html"
+  ),
+  quarto_args = c("--output-dir", out_dir_report)
+)
+
+# Same diagnostics report as Word (.docx).
+quarto_render(
+  input = paste0(from_wd_to_qmd_reports_templates, "DHARMa_report.qmd"),
+  output_format = "docx",
+  execute_dir = current_wd,
+  execute_params = list(
+    model_name = model_full_name,
+    m_file = paste0("_saved_models/", model_full_name, ".rds"),
+    m_description = "sdmTMB with sp no srf tweedie density as a function of poly depth",
+    m_input_data_file = data_input_file,
+    m_pos_covariates = model_covariates,
+    save_dharma_residuals = F,
+    run_gam_chunk = F,
+    run_sdmtmb_selftest_chunk = T,
+    selftest_nsims = 10,
+    meshcutoff = 10
+  ),
+  metadata = list(
+    title = model_full_name
+  ),
+  output_file = paste0(
+    model_full_name,
+    ".docx"
   ),
   quarto_args = c("--output-dir", out_dir_report)
 )

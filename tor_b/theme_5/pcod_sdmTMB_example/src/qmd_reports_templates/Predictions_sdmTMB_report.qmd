@@ -45,7 +45,7 @@ cat("Model file:", df_surv_file, "\n")
 ```{r load_packages}
 src_folder_location <- "src/"
 
-source(paste0(src_folder_location, "0_shrimp_setup.R"))
+source(paste0(src_folder_location, "0_setup.R"))
 
 library(ggOceanMaps)
 library(dplyr)

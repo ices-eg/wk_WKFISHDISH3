@@ -1,5 +1,89 @@
 # pcod sdmTMB Modelling Workflow
 
+## Main product: the DHARMa diagnostics report
+
+The main product of this folder is the Quarto template
+[`src/qmd_reports_templates/DHARMa_report.qmd`](src/qmd_reports_templates/DHARMa_report.qmd).
+It is a **parameterised, general-purpose model diagnostics report** that anyone can
+use with their own fitted model and survey data. The `pcod` workflow below is only
+an example of how to call it.
+
+Given a saved model and the survey data it was fitted to, the report produces:
+
+- A report summary (model, data, description, number of simulations)
+- Input validation, with clear errors if required objects or columns are missing
+- Model summary and conventional residual checks
+- DHARMa simulation-based diagnostics: example observations, a "Turing test"
+  (can you spot the observed data among simulated datasets?), simulated vs
+  observed means and distributions, QQ, dispersion, outlier and homoscedasticity
+  tests, zero inflation, and residuals vs fitted values and vs covariates
+- Spatial diagnostics: residual maps by year, Moran's I, yearly and combined
+  variograms, estimated ranges (optional)
+- Additional checks: GAM check and an sdmTMB self-test (both optional)
+
+### What you need to use it with your own model
+
+1. A fitted model saved as `.rds` (or `.rda` / `.RData`), loaded with `load_object()`.
+   `sdmTMB` models use `dharma_residuals()`; any other model class is passed to
+   `DHARMa::simulateResiduals()` (for example `glmmTMB`).
+2. The survey data as a saved file (`m_input_data_file`) with at least these
+   columns: `startyear`, `serialnumber`, `latitudestart`, `longitudestart`.
+3. The helper scripts `additional_quarto_funcs.R` and `Variogram_function.R`,
+   in the folder given by the `src_folder` parameter.
+
+### Calling the report
+
+```r
+quarto::quarto_render(
+  input = "src/qmd_reports_templates/DHARMa_report.qmd",
+  execute_dir = getwd(),   # the report runs from here, see src_folder below
+  execute_params = list(
+    model_name = "my_model",
+    m_file = "_saved_models/my_model.rds",
+    m_description = "Short description of the model",
+    m_input_data_file = "_data/my_data.rda",
+    m_pos_covariates = list("depth", "fYear")
+  ),
+  output_file = "my_model_DHARMa.html"
+)
+```
+
+### Report parameters
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `model_name` | `NULL` | Name shown in the report |
+| `m_file` | `NULL` | Path to the saved model |
+| `m_description` | `NULL` | Free-text model description |
+| `m_input_data_file` | `NULL` | Path to the survey data |
+| `m_pos_covariates` | `NULL` | Covariates to plot residuals against |
+| `n_simulations` | `250` | Number of DHARMa simulations |
+| `run_spatial_chunks` | `true` | Run the spatial diagnostics section |
+| `save_dharma_residuals` | `false` | Save the DHARMa residuals next to the model |
+| `save_dharma_simulations` | `false` | Save the DHARMa simulations next to the model |
+| `run_gam_chunk` | `false` | Run the GAM check |
+| `run_sdmtmb_selftest_chunk` | `false` | Run the sdmTMB self-test |
+| `selftest_nsims` | `10` | Number of simulations for the self-test |
+| `meshcutoff` | `10` | Mesh cutoff used by the self-test |
+| `src_folder` | `"src/"` | Folder with the helper scripts (see below) |
+
+### `src_folder` and the working directory
+
+The report loads its helper scripts with `source()` from `src_folder`. That path is
+**relative to the render's working directory (`execute_dir`), not to the `.qmd` file**.
+The default `"src/"` works when you render from this folder, as the `pcod` workflow
+does. If you render from somewhere else, pass the path explicitly, including the
+trailing slash:
+
+```r
+execute_params = list(
+  ...,
+  src_folder = "../src/"
+)
+```
+
+---
+
 ## Overview
 
 This script implements a full modelling and reporting workflow for survey-based density data (`pcod`) using the `sdmTMB` framework. It:
@@ -74,10 +158,13 @@ If you run it from another location (e.g. repo root), it may:
 
 The script also depends on helper files located in `src/`:
 
-- 0_shrimp_setup.R
+- 0_setup.R (loads, and installs if missing, all required packages)
 - Variogram_function.R
 - 1_survey_SDMfit_functions.R
 - additional_quarto_funcs.R
+
+`additional_quarto_funcs.R` and `Variogram_function.R` are also required by
+`DHARMa_report.qmd` (see `src_folder` above).
 
 ### ⚠️ IMPORTANT: Some other packages might be called internally from scripts located in the src/ and quarto templates folders.
 
